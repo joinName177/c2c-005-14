@@ -33,4 +33,37 @@ describe('Voice meme App', () => {
     await wrapper.get('[data-testid="to-cover"]').trigger('click'); await wrapper.get('[aria-label="气泡文字"]').setValue('轻轻说一句'); await wrapper.get('[data-testid="save-work"]').trigger('click'); await Promise.resolve(); await Promise.resolve();
     expect(wrapper.text()).toContain('作品集'); expect(wrapper.text()).toContain('我的声音表情');
   });
+  it('locks cover editing while saving and ignores repeated clicks', async () => {
+    let releaseRender: (() => void) | undefined; let saveCount = 0;
+    const works: VoiceMeme[] = [];
+    const wrapper=mount(App,{props:{dependencies:{...deps(),renderer:{render:async()=>new Promise<Blob>((resolve)=>{releaseRender=()=>resolve(new Blob(['cover'],{type:'image/png'}));})},repository:{list:async()=>works,save:async(m)=>{saveCount+=1;works.push(m)},rename:async()=>{},delete:async()=>{}}}}});
+    await wrapper.get('[data-testid="record"]').trigger('click'); await wrapper.get('[data-testid="stop"]').trigger('click'); await Promise.resolve();
+    await wrapper.get('[data-testid="analyze"]').trigger('click'); await Promise.resolve(); await Promise.resolve(); await wrapper.get('[data-emotion="温柔姐姐"]').trigger('click');
+    await wrapper.get('[data-testid="to-cover"]').trigger('click'); await wrapper.get('[aria-label="气泡文字"]').setValue('保存中的文字');
+    await wrapper.get('[data-testid="save-work"]').trigger('click'); await wrapper.vm.$nextTick(); await Promise.resolve();
+    const button = wrapper.get('[data-testid="save-work"]').element as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect((wrapper.get('[aria-label="气泡文字"]').element as HTMLTextAreaElement).disabled).toBe(true);
+    expect(wrapper.text()).toContain('正在保存');
+    await wrapper.get('[data-testid="save-work"]').trigger('click');
+    expect(saveCount).toBe(0);
+    releaseRender!(); await Promise.resolve(); await Promise.resolve(); await wrapper.vm.$nextTick();
+    expect(saveCount).toBe(1);
+    expect(wrapper.text()).toContain('作品集');
+  });
+  it('retries the gallery refresh after a successful write without duplicating the work', async () => {
+    let failList = false;
+    const works: VoiceMeme[] = [];
+    const wrapper=mount(App,{props:{dependencies:{...deps(),repository:{list:async()=>{if(failList)throw new Error('list down');return works},save:async(m)=>{works.push(m);failList=true},rename:async()=>{},delete:async()=>{}}}}});
+    await wrapper.get('[data-testid="record"]').trigger('click'); await wrapper.get('[data-testid="stop"]').trigger('click'); await Promise.resolve();
+    await wrapper.get('[data-testid="analyze"]').trigger('click'); await Promise.resolve(); await Promise.resolve(); await wrapper.get('[data-emotion="元气满满"]').trigger('click');
+    await wrapper.get('[data-testid="to-cover"]').trigger('click'); await wrapper.get('[data-testid="save-work"]').trigger('click'); await Promise.resolve(); await Promise.resolve();
+    expect(wrapper.text()).toContain('列表刷新失败');
+    expect(works).toHaveLength(1);
+    failList = false;
+    await wrapper.get('[data-testid="retry-collection"]').trigger('click'); await Promise.resolve();
+    expect(wrapper.text()).toContain('我的声音表情');
+    expect(wrapper.text()).not.toContain('列表刷新失败');
+    expect(works).toHaveLength(1);
+  });
 });

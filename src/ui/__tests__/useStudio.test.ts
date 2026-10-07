@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { useStudio, type StudioDependencies } from '../useStudio';
 import { coverPresetFor } from '../../core/cover-presets';
-import type { VoiceMeme } from '../../core/models';
+import type { CoverConfig, VoiceMeme } from '../../core/models';
 
 function dependencies(overrides: Partial<StudioDependencies> = {}): StudioDependencies {
   const saved: VoiceMeme[] = [];
@@ -14,6 +14,18 @@ function dependencies(overrides: Partial<StudioDependencies> = {}): StudioDepend
     share: { share: async () => 'shared' },
     ...overrides,
   };
+}
+
+function readyToSave(studio: ReturnType<typeof useStudio>) {
+  studio.draft.audio = new Blob(['a']); studio.draft.duration = 1; studio.draft.title = '旧名称';
+  studio.cover.value = { ...coverPresetFor('元气满满'), bubbleText: '旧气泡' };
+  studio.emotion.value = { label:'元气满满',confidence:.9,explanation:'测试',scores:{'暴躁老哥':0,'温柔姐姐':0,'阴阳怪气':0,'元气满满':1} };
+  studio.features.value = { loudness:.5,dynamics:.5,pitch:.5,zeroCrossing:.5,pauseRatio:.1,tempoVariation:.5 };
+  studio.stage.value = 'cover';
+}
+
+function putRepository(saved: VoiceMeme[]) {
+  return { list: async()=>saved, save: async(m:VoiceMeme)=>{const i=saved.findIndex(x=>x.id===m.id);if(i>=0)saved[i]=m;else saved.push(m)}, rename:async()=>{}, delete:async()=>{} };
 }
 
 describe('useStudio', () => {
@@ -35,5 +47,44 @@ describe('useStudio', () => {
     await studio.save(); expect(studio.error.value).toContain('保存失败'); expect(studio.draft.audio?.size).toBe(1);
     const existing = { id:'old',title:'旧作品',emotion:'温柔姐姐' as const,confidence:.8,features:{loudness:.2,dynamics:.2,pitch:.4,zeroCrossing:.2,pauseRatio:.3,tempoVariation:.2},audio:new Blob(['a']),duration:1,cover:new Blob(['c']),coverConfig:coverPresetFor('温柔姐姐'),createdAt:'2026-10-05' };
     studio.editMeme(existing); expect(studio.draft.title).toBe('旧作品'); expect(studio.stage.value).toBe('cover');
+  });
+  it('saves a consistent snapshot even when the user edits during rendering', async () => {
+    let releaseRender!: () => void; const gate = new Promise<void>((resolve) => { releaseRender = resolve; });
+    const saved: VoiceMeme[] = []; const rendered: CoverConfig[] = [];
+    const studio = useStudio(dependencies({
+      renderer: { render: async (config) => { rendered.push({ ...config }); await gate; return new Blob(['cover'], { type: 'image/png' }); } },
+      repository: putRepository(saved),
+    }));
+    readyToSave(studio);
+    const pending = studio.save();
+    studio.updateTitle('新名称'); studio.patchCover({ bubbleText: '新气泡' });
+    releaseRender(); await pending;
+    expect(saved).toHaveLength(1);
+    expect(rendered[0].bubbleText).toBe('旧气泡');
+    expect(saved[0].title).toBe('旧名称'); expect(saved[0].coverConfig.bubbleText).toBe('旧气泡');
+    expect(saved[0].coverConfig).toEqual(rendered[0]);
+    expect(studio.stage.value).toBe('cover'); expect(studio.notice.value).toContain('尚未保存');
+    await studio.save();
+    expect(saved).toHaveLength(1); expect(saved[0].title).toBe('新名称'); expect(saved[0].coverConfig.bubbleText).toBe('新气泡');
+    expect(studio.stage.value).toBe('collection');
+  });
+  it('ignores repeated save clicks while a save is in flight', async () => {
+    let releaseRender!: () => void; const gate = new Promise<void>((resolve) => { releaseRender = resolve; });
+    const saved: VoiceMeme[] = [];
+    const studio = useStudio(dependencies({ renderer: { render: async () => { await gate; return new Blob(['cover'], { type: 'image/png' }); } }, repository: putRepository(saved) }));
+    readyToSave(studio);
+    const first = studio.save(); const second = studio.save();
+    releaseRender(); await Promise.all([first, second]);
+    expect(saved).toHaveLength(1);
+  });
+  it('keeps a successful save when the list refresh fails and retries update the same work', async () => {
+    const saved: VoiceMeme[] = []; let listCalls = 0;
+    const repository = { ...putRepository(saved), list: async () => { listCalls++; if (listCalls === 1) throw new Error('indexeddb busy'); return saved; } };
+    const studio = useStudio(dependencies({ repository }));
+    readyToSave(studio);
+    await studio.save();
+    expect(studio.error.value).toBe(''); expect(studio.notice.value).toContain('已保存'); expect(saved).toHaveLength(1);
+    await studio.save();
+    expect(saved).toHaveLength(1); expect(studio.error.value).toBe(''); expect(studio.stage.value).toBe('collection');
   });
 });

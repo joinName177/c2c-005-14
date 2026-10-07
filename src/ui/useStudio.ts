@@ -21,11 +21,28 @@ export function useStudio(deps: StudioDependencies) {
   async function analyze() { if (!draft.audio) { error.value = '请先录制或导入一段声音'; return; } const cropped = await deps.cropper.crop(draft.audio, { start: draft.cropStart, end: draft.cropEnd }); draft.audio = cropped.blob; draft.duration = cropped.duration; const result = await deps.analyzer.analyze(cropped.blob); features.value = result.features; emotion.value = classifyEmotion(result.features); cover.value = coverPresetFor(emotion.value.label); stage.value = 'emotion'; }
   function selectEmotion(label: EmotionLabel) { const current = emotion.value ?? classifyEmotion({ loudness:0,dynamics:0,pitch:0,zeroCrossing:0,pauseRatio:1,tempoVariation:0 }); emotion.value = { ...current, label, explanation: `已手动选择「${label}」标签。` }; cover.value = { ...coverPresetFor(label), title: cover.value.title || label }; }
   function goCover() { stage.value = 'cover'; }
-  async function save(target?: HTMLCanvasElement) { if (!draft.audio || !emotion.value || !features.value) { error.value = '作品信息尚未完整，请先完成声音分析'; return; } try { const coverBlob = await deps.renderer.render(cover.value, target); const meme: VoiceMeme = { id: draft.id ?? `meme-${Date.now()}`, title: draft.title.trim() || '未命名声音', emotion: emotion.value.label, confidence: emotion.value.confidence, features: features.value, audio: draft.audio, duration: draft.duration, cover: coverBlob, coverConfig: { ...cover.value }, createdAt: new Date().toISOString() }; await deps.repository.save(meme); await loadCollection(); stage.value = 'collection'; notice.value = '作品已保存到本地'; } catch { error.value = '保存失败，本次编辑内容仍保留，请检查浏览器存储空间。'; } }
+  const saving = ref(false); const draftVersion = ref(0);
+  function updateTitle(title: string) { draft.title = title; draftVersion.value++; }
+  function patchCover(patch: Partial<CoverConfig>) { cover.value = { ...cover.value, ...patch }; draftVersion.value++; }
+  interface SaveSnapshot { id: string; title: string; emotion: EmotionResult; features: AudioFeatures; audio: Blob; duration: number; coverConfig: CoverConfig; version: number }
+  function takeSnapshot(): SaveSnapshot | undefined { if (!draft.audio || !emotion.value || !features.value) return undefined; return { id: draft.id ?? `meme-${Date.now()}`, title: draft.title.trim() || '未命名声音', emotion: { ...emotion.value }, features: { ...features.value }, audio: draft.audio, duration: draft.duration, coverConfig: { ...cover.value, palette: [...cover.value.palette] }, version: draftVersion.value }; }
+  async function save(target?: HTMLCanvasElement) {
+    if (saving.value) return;
+    const snapshot = takeSnapshot(); if (!snapshot) { error.value = '作品信息尚未完整，请先完成声音分析'; return; }
+    saving.value = true; error.value = '';
+    try {
+      const coverBlob = await deps.renderer.render(snapshot.coverConfig, target);
+      const meme: VoiceMeme = { id: snapshot.id, title: snapshot.title, emotion: snapshot.emotion.label, confidence: snapshot.emotion.confidence, features: snapshot.features, audio: snapshot.audio, duration: snapshot.duration, cover: coverBlob, coverConfig: snapshot.coverConfig, createdAt: new Date().toISOString() };
+      await deps.repository.save(meme);
+    } catch { error.value = '保存失败，本次编辑内容仍保留，请检查浏览器存储空间。'; saving.value = false; return; }
+    saving.value = false; draft.id = snapshot.id;
+    try { await loadCollection(); notice.value = '作品已保存到本地'; } catch { notice.value = '作品已保存，但作品集刷新失败，可稍后重新打开查看'; }
+    if (draftVersion.value === snapshot.version) { stage.value = 'collection'; } else { notice.value = '作品已保存；保存期间的新修改尚未保存，可继续编辑后再次保存'; }
+  }
   async function loadCollection() { collection.value = (await deps.repository.list()).sort((a,b) => b.createdAt.localeCompare(a.createdAt)); }
   function editMeme(meme: VoiceMeme) { Object.assign(draft, { id:meme.id,title:meme.title,audio:meme.audio,duration:meme.duration,cropStart:0,cropEnd:meme.duration }); features.value = meme.features; emotion.value = { label:meme.emotion,confidence:meme.confidence,explanation:'编辑已保存作品',scores:{'暴躁老哥':0,'温柔姐姐':0,'阴阳怪气':0,'元气满满':0} }; cover.value = { ...meme.coverConfig }; stage.value = 'cover'; }
   async function deleteMeme(id: string) { await deps.repository.delete(id); await loadCollection(); }
   async function shareMeme(meme: VoiceMeme) { const result = await deps.share.share(meme); notice.value = result === 'shared' ? '已打开系统分享' : '浏览器不支持文件分享，已下载音频和封面'; }
   function newRecording() { draft.id = undefined; draft.title = '我的声音表情'; draft.audio = undefined; emotion.value = undefined; features.value = undefined; stage.value = 'record'; error.value = ''; }
-  return { stage,error,notice,level,draft,emotion,features,cover,collection,startRecording,stopRecording,importAudio,analyze,selectEmotion,goCover,save,loadCollection,editMeme,deleteMeme,shareMeme,newRecording };
+  return { stage,error,notice,level,draft,emotion,features,cover,collection,saving,startRecording,stopRecording,importAudio,analyze,selectEmotion,goCover,save,updateTitle,patchCover,loadCollection,editMeme,deleteMeme,shareMeme,newRecording };
 }
